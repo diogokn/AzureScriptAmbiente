@@ -1,0 +1,195 @@
+###################################################################
+#######Criando um ambiente DMZ e Interno, com Load Balance ########
+###################################################################
+
+
+###################################################################
+######Criando uma Resource Group######
+
+###### Resource Group é um contêiner que mantém os recursos relacionados para uma aplicação######
+#CREATE RESOURCE GROUP DSV
+az group create -l CentralUS -n DSV
+
+
+###################################################################
+######Criando uma Virtual networks - Vnet ######
+###### VNet é o bloco de construção fundamental de sua rede privada no Azure. Ela permite vários tipos de recursos do Azure, como VMs (Máquinas Virtuais) do Azure, a fim de se comunicar de forma segura com a Internet, com as redes locais e com outras VMs ######
+#CREATE VNET DSV
+az network vnet create -g DSV -n DSV --address-prefix 10.1.0.0/16 \
+    --subnet-name frontend_dsv --subnet-prefix 10.1.0.0/24 --ddos-protection false
+
+#CREATE SUBNET BACKEND
+az network vnet subnet create -g DSV --vnet-name DSV -n backend_dsv\
+    --address-prefixes 10.1.1.0/24
+
+
+###################################################################
+######Criando uma Network Security Group - NSG - Grupo de Segurança da Rede ######
+#CREATE NSG FRONTEND
+az network nsg create \
+--name frontend_dsv \
+--resource-group DSV \
+--location CentralUS
+
+#CREATE NSG BACKEND
+az network nsg create \
+--name backend_dsv \
+--resource-group DSV \
+--location CentralUS
+
+#SET NSG FRONTEND
+####Associar com a placa vnet####
+az network vnet subnet update -g DSV -n frontend_dsv --vnet-name DSV --network-security-group frontend_dsv
+
+#SET NSG BACKEND
+####Associar com a placa vnet####
+az network vnet subnet update -g DSV -n backend_dsv --vnet-name DSV --network-security-group backend_dsv
+
+
+###################################################################
+######Criando um Load Balance######
+#Public IP Address
+az network public-ip create --resource-group DSV --name IPLB --sku standard
+
+#Create LB
+az network lb create \
+    --resource-group DSV \
+    --name weblb_dsv \
+    --sku standard \
+    --public-ip-address IPLB \
+    --frontend-ip-name myFrontEnd_dsv \
+    --backend-pool-name myBackEndPool_dsv
+
+#Create LB Probe
+az network lb probe create \
+    --resource-group DSV \
+    --lb-name weblb_dsv \
+    --name WEBHealthProbe_dsv \
+    --protocol tcp \
+    --port 80
+
+#Create LB Rule
+az network lb rule create \
+    --resource-group DSV \
+    --lb-name weblb_dsv \
+    --name WEBHTTPRule_dsv \
+    --protocol tcp \
+    --frontend-port 80 \
+    --backend-port 80 \
+    --frontend-ip-name myFrontEnd_dsv \
+    --backend-pool-name myBackEndPool_dsv \
+    --probe-name WEBHealthProbe_dsv
+
+
+###################################################################
+################################### CREATE NIC ####################
+#Criando as placa de rede
+#Public IP Address
+az network public-ip create --resource-group DSV --name PUBWB1_dsv --sku standard
+
+az network public-ip create --resource-group DSV --name PUBWB2_dsv --sku standard
+
+
+az network nic create \
+    --resource-group DSV \
+    --name WEBNic_dsv \
+    --public-ip-address PUBWB1_dsv \
+    --vnet-name DSV \
+    --subnet frontend_dsv \
+    --network-security-group frontend_dsv \
+    --lb-name weblb_dsv \
+    --lb-address-pools myBackEndPool_dsv
+
+
+  az network nic create \
+    --resource-group DSV \
+    --name WEB2Nic_dsv \
+    --public-ip-address PUBWB2_dsv \
+    --vnet-name DSV \
+    --subnet backend_dsv \
+    --network-security-group backend_dsv \
+    --lb-name weblb_dsv \
+    --lb-address-pools myBackEndPool_dsv
+
+
+################################## AVAILABILITY SET ###############################
+az vm availability-set create \
+    --resource-group DSV \
+    --name WEBAvailabilitySet_dsv
+
+
+
+################################# VIRTUAL MACHINE #################################
+#Criando Máquinas Virtuais
+#CREATE VM WEB_dsv
+az vm create \
+    --resource-group DSV \
+    --name WEB_dsv \
+    --nics WEBNic_dsv \
+    --image win2016datacenter \
+    --admin-username azureuser \
+    --admin-password myPassword@123 \
+    --authentication-type password \
+    --enable-agent false \
+    --license-type Windows_Server \
+    --location CentralUS \
+    --private-ip-address 10.0.0.4 \
+    --ultra-ssd-enabled false \
+    --zone 1
+
+#CREATE VM WEB2_dsv
+az vm create \
+    --resource-group DSV \
+    --name WEB2_dsv \
+    --nics WEB2Nic_dsv \
+    --image win2016datacenter \
+    --admin-username azureuser \
+    --admin-password myPassword@123 \
+    --authentication-type password \
+    --enable-agent false \
+    --license-type Windows_Server \
+    --location CentralUS \
+    --private-ip-address 10.0.0.7 \
+    --ultra-ssd-enabled false \
+    --zone 1
+
+#CREATE VM DATABASE_dsv
+az vm create \
+    --resource-group DSV \
+    --name DATABASE_dsv \
+    --image win2016datacenter \
+    --admin-username azureuser \
+    --admin-password myPassword@123 \
+    --accelerated-networking false \
+    --authentication-type password \
+    --enable-agent false \
+    --license-type Windows_Server \
+    --location CentralUS \
+    --nsg backend_dsv \
+    --private-ip-address 10.1.1.5 \
+    --public-ip-address "DATABASEPUB" \
+    --public-ip-address-allocation static \
+    --subnet backend_dsv \
+    --ultra-ssd-enabled false \
+    --vnet-name DSV \
+    --zone 1
+
+
+################################### ROLES #############################################
+#SET ROLE RDP NSG frontend
+az network nsg rule create -g DSV --nsg-name frontend_dsv -n nsgrdp --priority 100 \
+    --source-address-prefixes '*' --source-port-ranges '*' \
+    --destination-address-prefixes '*' --destination-port-ranges 3389 --access Allow \
+    --protocol '*' --description "Allow from RDP."
+
+#SET ROLE RDP NSG backend
+az network nsg rule create -g DSV --nsg-name backend_dsv -n nsgrdp --priority 100 \
+    --source-address-prefixes '*' --source-port-ranges '*' \
+    --destination-address-prefixes '*' --destination-port-ranges 3389 --access Allow \
+    --protocol '*' --description "Allow from RDP."
+
+#OPEN PORT 80 VM WEB
+az vm open-port --port 80 --resource-group DSV --name WEB_dsv
+
+#OPEN PORT 80 VM WEB2
+az vm open-port --port 80 --resource-group DSV --name WEB2_dsv
